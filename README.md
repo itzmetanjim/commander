@@ -44,6 +44,16 @@ In the `commander{` block,
 - `className` is the name of the generated command class. Change if there are conflicts (you have your own class with the same name).
 - `side` is the side that the command will be registered on. If your mod is strictly client side, change this to "client". Otherwise, leave it as "server".
 - `commandsFile` is the path to the file that will contain your commands.
+
+To add Maven Central, add this to `settings.gradle` or `settings.gradle.kts`:
+```kotlin
+pluginManagement {
+    repositories {
+        mavenCentral() //add this!
+        gradlePluginPortal()
+    }
+}
+```
 ## Put all your command logic in a class
 To each function, the commands arguments will be passed in order if you use `|>` or in whatever order you choose if you use `->`,
 and the context will be passed as the last argument. When defining your function, the last argument must be of type 
