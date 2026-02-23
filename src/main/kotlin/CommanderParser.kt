@@ -1,4 +1,4 @@
-package org.tanjim.colonel
+package org.tanjim.commander
 import com.github.h0tk3y.betterParse.combinators.*
 import com.github.h0tk3y.betterParse.grammar.Grammar
 import com.github.h0tk3y.betterParse.grammar.parseToEnd
@@ -13,52 +13,41 @@ import org.gradle.api.provider.Property
 import org.gradle.api.tasks.*
 import java.io.File
 import javax.lang.model.element.Modifier
-
 enum class ArgType {
     Word, String, GreedyString, BlockPos, Bool, Double, Float, Integer, Long, Entity
 }
-
-data class RequiredArg(val name: kotlin.String, val type: ArgType)
-
-data class OptionalArg(val name: kotlin.String, val type: ArgType, val default: kotlin.String)
-
-data class OptionalEnumArg(val name: kotlin.String, val values: List<kotlin.String>, val default: kotlin.String)
-
+data class RequiredArg(val name: String, val type: ArgType)
+data class OptionalArg(val name: String, val type: ArgType, val default: String)
+data class RequiredEnumArg(val name: String, val values: List<String>)
+data class OptionalEnumArg(val name: String, val values: List<String>, val default: String)
 sealed class CommandToken {
-    data class Literal(val text: kotlin.String) : CommandToken()
-
+    data class Literal(val text: String) : CommandToken()
     data class Required(val arg: RequiredArg) : CommandToken()
-
     data class Optional(val arg: OptionalArg) : CommandToken()
-
+    data class RequiredEnum(val arg: RequiredEnumArg) : CommandToken()
     data class OptionalEnum(val arg: OptionalEnumArg) : CommandToken()
 }
-
 sealed class CommandAction {
-    data class ExplicitCall(val function: kotlin.String, val args: List<kotlin.String>) : CommandAction()
-
-    data class AutoCall(val function: kotlin.String) : CommandAction()
+    data class ExplicitCall(val function: String, val args: List<String>) : CommandAction()
+    data class AutoCall(val function: String) : CommandAction()
 }
-
 data class CommandDef(
     val permissionLevel: Int,
     val tokens: List<CommandToken>,
     val action: CommandAction
 )
-
-data class CommandFile(
-    val commands: List<CommandDef>)
-
-class ColonelGrammar : Grammar<CommandFile>() {
+data class CommandFile(val imports: List<String>,
+                       val commands: List<CommandDef>)
+class CommanderGrammar : Grammar<CommandFile>() {
     @Suppress("unused")
     val blockComment by regexToken("/\\*[\\s\\S]*?\\*/", ignore = true)
     @Suppress("unused")
-    val lineComment by regexToken("(?://|#)[^\\n]*", ignore = true) //both python and js comments will work!
+    val lineComment by regexToken("(?://|#)[^\\n]*", ignore = true) //both python and js comments will work yippee!
     @Suppress("unused")
     val newlines by regexToken("\\n+", ignore = true)
     @Suppress("unused")
     val ws by regexToken("[ \\t]+", ignore = true)
-
+    val tildeImport by literalToken("~import")
     val lAngle by literalToken("<")
     val rAngle by literalToken(">")
     val lBracket by literalToken("[")
@@ -73,18 +62,14 @@ class ColonelGrammar : Grammar<CommandFile>() {
     val at by literalToken("@")
     val inKeyword by literalToken("in")
     val dot by literalToken(".")
-
     val quotedString by regexToken("\"[^\"]*\"")
     val integer by regexToken("\\d+")
     val identifier by regexToken("[A-Za-z_][A-Za-z0-9_]*")
 
-
     val bareWord: Parser<String> by identifier use { text }
     val quotedValue: Parser<String> by quotedString use { text.removeSurrounding("\"") }
     val wordValue: Parser<String> by bareWord or quotedValue
-
     val dottedIdentifier: Parser<String> by separatedTerms(bareWord, dot) use { joinToString(".") }
-
     val argType: Parser<ArgType> by identifier use {
         when (text) {
             "Word" -> ArgType.Word
@@ -100,64 +85,56 @@ class ColonelGrammar : Grammar<CommandFile>() {
             else -> throw IllegalArgumentException("Unknown argument type: $text")
         }
     }
-
     val requiredArg: Parser<CommandToken.Required> by
     -lAngle * bareWord * -colon * argType * -rAngle map { (name, type) ->
         CommandToken.Required(RequiredArg(name, type))
     }
-
+    val importing: Parser<String> by tildeImport * dottedIdentifier map { it.t2 }
     val enumValues: Parser<List<String>> by
     -lBracket * separatedTerms(wordValue, comma) * -rBracket
-
+    val requiredEnumArg: Parser<CommandToken.RequiredEnum> by
+    -lAngle * bareWord * -inKeyword * enumValues * -rAngle map { (name, values) ->
+        CommandToken.RequiredEnum(RequiredEnumArg(name, values))
+    }
     val optionalEnumArg: Parser<CommandToken.OptionalEnum> by
     -lBracket * bareWord * -inKeyword * enumValues * optional(-equals * wordValue) * -rBracket map { (name, values, default) ->
         CommandToken.OptionalEnum(OptionalEnumArg(name, values, default ?: ""))
     }
-
     val optionalTypedArg: Parser<CommandToken.Optional> by
     -lBracket * bareWord * -colon * argType * -equals * wordValue * -rBracket map { (name, type, default) ->
         CommandToken.Optional(OptionalArg(name, type, default))
     }
-
     val literalToken: Parser<CommandToken.Literal> by wordValue map { CommandToken.Literal(it) }
-
-    val commandToken: Parser<CommandToken> by requiredArg or optionalEnumArg or optionalTypedArg or literalToken
-
+    val commandToken: Parser<CommandToken> by requiredEnumArg or requiredArg or optionalEnumArg or optionalTypedArg or literalToken
     val callArgs: Parser<List<String>> by
     -lParen * optional(separatedTerms(wordValue, comma)) * -rParen map { it ?: emptyList() }
-
     val explicitAction: Parser<CommandAction.ExplicitCall> by
     -arrow * dottedIdentifier * callArgs map { (func, args) ->
         CommandAction.ExplicitCall(func, args)
     }
-
     val autoAction: Parser<CommandAction.AutoCall> by
     -pipeArrow * dottedIdentifier map { CommandAction.AutoCall(it) }
-
     val permissionLevel: Parser<Int> by
     -at * integer use { text.toInt() }
-
     val commandDef: Parser<CommandDef> by
     optional(permissionLevel) * oneOrMore(commandToken) * (explicitAction or autoAction) map { (perm, tokens, action) ->
         CommandDef(perm ?: 0, tokens, action)
     }
     override val rootParser: Parser<CommandFile> by
-    zeroOrMore(commandDef) map { CommandFile(it) }
+    zeroOrMore(importing) * zeroOrMore(commandDef) map { (imports, cmds) ->
+        CommandFile(imports, cmds)
+    }
 }
-
 
 enum class CommandSide { SERVER, CLIENT }
 
-
-
 object FlatCodeGenerator {
-    private val TEXT_CLASS = ClassName.get("net.minecraft.text", "Text")
     fun generate(
         commandFile: CommandFile,
         packageName: String,
         className: String,
         side: CommandSide
-    ): JavaFile {
+    ): String {
         val typeBuilder = TypeSpec.classBuilder(className)
             .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
         if (side == CommandSide.CLIENT) {
@@ -165,16 +142,60 @@ object FlatCodeGenerator {
         }
         val registerMethod = generateRegisterMethod(commandFile.commands, side)
         typeBuilder.addMethod(registerMethod)
-        return JavaFile.builder(packageName, typeBuilder.build())
+        val javaFile = JavaFile.builder(packageName, typeBuilder.build())
             .indent("    ")
             .build()
+        val rawSource = javaFile.toString()
+        val frameworkImports = collectFrameworkImports(commandFile.commands, side)
+        val allImports = frameworkImports + commandFile.imports
+        if (allImports.isEmpty()) {
+            return rawSource
+        }
+        val importBlock = allImports.joinToString("\n") { "import $it;" }
+        val packageEnd = rawSource.indexOf(";\n", rawSource.indexOf("package "))
+        if (packageEnd == -1) {
+            return importBlock + "\n\n" + rawSource
+        }
+        val insertPos = packageEnd + 2 //after the ";\n", that is 2 chars
+        return rawSource.substring(0, insertPos) + "\n" + importBlock + "\n" + rawSource.substring(insertPos)
     }
-    private val CLIENT_CMD_SRC = ClassName.get("net.fabricmc.fabric.api.client.command.v2", "FabricClientCommandSource")
-    private val CLIENT_CMD_MGR = ClassName.get("net.fabricmc.fabric.api.client.command.v2", "ClientCommandManager")
-    private val SERVER_CMD_SRC = ClassName.get("net.minecraft.server.command", "ServerCommandSource")
-    private val SERVER_CMD_MGR = ClassName.get("net.minecraft.server.command", "CommandManager")
-    private val CLIENT_REG_CALLBACK = ClassName.get("net.fabricmc.fabric.api.client.command.v2", "ClientCommandRegistrationCallback")
-    private val SERVER_REG_CALLBACK = ClassName.get("net.fabricmc.fabric.api.command.v2", "CommandRegistrationCallback")
+    private fun collectFrameworkImports(commands: List<CommandDef>, side: CommandSide): List<String> {
+        val imports = mutableListOf<String>()
+        imports.add("net.minecraft.text.Text")
+        if (side == CommandSide.CLIENT) {
+            imports.add("net.fabricmc.fabric.api.client.command.v2.ClientCommandManager")
+        } else {
+            imports.add("net.minecraft.server.command.CommandManager")
+        }
+        val usedArgTypes = commands.flatMap { cmd ->
+            cmd.tokens.mapNotNull { token ->
+                when (token) {
+                    is CommandToken.Required -> token.arg.type
+                    is CommandToken.Optional -> token.arg.type
+                    else -> null
+                }
+            }
+        }.toSet()
+        val argTypeImports = mapOf(
+            ArgType.Word to "com.mojang.brigadier.arguments.StringArgumentType",
+            ArgType.String to "com.mojang.brigadier.arguments.StringArgumentType",
+            ArgType.GreedyString to "com.mojang.brigadier.arguments.StringArgumentType",
+            ArgType.Bool to "com.mojang.brigadier.arguments.BoolArgumentType",
+            ArgType.Double to "com.mojang.brigadier.arguments.DoubleArgumentType",
+            ArgType.Float to "com.mojang.brigadier.arguments.FloatArgumentType",
+            ArgType.Integer to "com.mojang.brigadier.arguments.IntegerArgumentType",
+            ArgType.Long to "com.mojang.brigadier.arguments.LongArgumentType",
+            ArgType.BlockPos to "net.minecraft.command.argument.BlockPosArgumentType",
+            ArgType.Entity to "net.minecraft.command.argument.EntityArgumentType"
+        )
+        for (argType in usedArgTypes) {
+            argTypeImports[argType]?.let { imports.add(it) }
+        }
+        return imports.distinct()
+    }
+    private val CLIENT_SRC = ClassName.get("net.fabricmc.fabric.api.client.command.v2", "FabricClientCommandSource")
+    private val CLIENT_CALLBACK = ClassName.get("net.fabricmc.fabric.api.client.command.v2", "ClientCommandRegistrationCallback")
+    private val SERVER_CALLBACK = ClassName.get("net.fabricmc.fabric.api.command.v2", "CommandRegistrationCallback")
     private val POS_ARGUMENT = ClassName.get("net.minecraft.command.argument", "PosArgument")
     private val BLOCK_POS = ClassName.get("net.minecraft.util.math", "BlockPos")
     private val COMMAND_CONTEXT = ClassName.get("com.mojang.brigadier.context", "CommandContext")
@@ -183,12 +204,12 @@ object FlatCodeGenerator {
             .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
             .returns(BLOCK_POS)
             .addParameter(
-                ParameterizedTypeName.get(COMMAND_CONTEXT, CLIENT_CMD_SRC),
+                ParameterizedTypeName.get(COMMAND_CONTEXT, CLIENT_SRC),
                 "context"
             )
             .addParameter(ClassName.get("java.lang", "String"), "name")
             .addStatement(
-                "\$T arg = context.getArgument(name, \$T.class)",
+                $$"$T arg = context.getArgument(name, $T.class)",
                 POS_ARGUMENT, POS_ARGUMENT
             )
             .addStatement(
@@ -201,8 +222,7 @@ object FlatCodeGenerator {
         val method = MethodSpec.methodBuilder("register")
             .addModifiers(Modifier.PUBLIC, Modifier.STATIC)
             .returns(TypeName.VOID)
-        val regCallback = if (side == CommandSide.CLIENT) CLIENT_REG_CALLBACK else SERVER_REG_CALLBACK
-
+        val regCallback = if (side == CommandSide.CLIENT) CLIENT_CALLBACK else SERVER_CALLBACK
         val grouped = commands.groupBy { cmd ->
             val first = cmd.tokens.first()
             require(first is CommandToken.Literal) { "Command must start with a literal word" }
@@ -214,12 +234,12 @@ object FlatCodeGenerator {
         }
         if (side == CommandSide.CLIENT) {
             method.addCode(
-                "\$T.EVENT.register((dispatcher, registryAccess) -> {\n",
+                $$"$T.EVENT.register((dispatcher, registryAccess) -> {\n",
                 regCallback
             )
         } else {
             method.addCode(
-                "\$T.EVENT.register((dispatcher, registryAccess, environment) -> {\n",
+                $$"$T.EVENT.register((dispatcher, registryAccess, environment) -> {\n",
                 regCallback
             )
         }
@@ -229,7 +249,6 @@ object FlatCodeGenerator {
     }
     private fun buildRootCommand(rootLiteral: String, commands: List<CommandDef>, side: CommandSide): String {
         val cmdMgr = if (side == CommandSide.CLIENT) "ClientCommandManager" else "CommandManager"
-
         val tree = CommandTreeBuilder.build(commands.map { it.copy(tokens = it.tokens.drop(1)) })
         val rendered = CommandTreeBuilder.render(tree, cmdMgr, side, 2)
         return "    dispatcher.register(\n" +
@@ -238,10 +257,6 @@ object FlatCodeGenerator {
                 "    );\n"
     }
 }
-/**
- * Builds a proper command tree from a list of CommandDefs and renders it as
- * Brigadier builder chain code.
- */
 object CommandTreeBuilder {
     data class Node(
         val token: CommandToken? = null,
@@ -272,15 +287,14 @@ object CommandTreeBuilder {
         }
         val first = tokens.first()
         val rest = tokens.drop(1)
-
         val newArgs = argsSoFar.toMutableList()
         when (first) {
             is CommandToken.Required -> newArgs.add(first.arg.name to first)
             is CommandToken.Optional -> newArgs.add(first.arg.name to first)
+            is CommandToken.RequiredEnum -> newArgs.add(first.arg.name to first)
             is CommandToken.OptionalEnum -> newArgs.add(first.arg.name to first)
-            is CommandToken.Literal -> {} // literals don't add args
+            is CommandToken.Literal -> {} //literals don't add args
         }
-
         val existing = parent.children.find { matchToken(it.token, first) }
         if (existing != null) {
             if (rest.isEmpty()) {
@@ -304,55 +318,61 @@ object CommandTreeBuilder {
     }
     private fun matchToken(a: CommandToken?, b: CommandToken?): Boolean {
         if (a == null || b == null) return false
-        return when {
-            a is CommandToken.Literal && b is CommandToken.Literal -> a.text == b.text
-            a is CommandToken.Required && b is CommandToken.Required ->
+        return when (a) {
+            is CommandToken.Literal if b is CommandToken.Literal -> a.text == b.text
+            is CommandToken.Required if b is CommandToken.Required ->
                 a.arg.name == b.arg.name && a.arg.type == b.arg.type
-            a is CommandToken.Optional && b is CommandToken.Optional ->
+            is CommandToken.Optional if b is CommandToken.Optional ->
                 a.arg.name == b.arg.name && a.arg.type == b.arg.type
-            a is CommandToken.OptionalEnum && b is CommandToken.OptionalEnum ->
+            is CommandToken.RequiredEnum if b is CommandToken.RequiredEnum ->
+                a.arg.name == b.arg.name
+            is CommandToken.OptionalEnum if b is CommandToken.OptionalEnum ->
                 a.arg.name == b.arg.name
             else -> false
         }
     }
     fun render(root: Node, cmdMgr: String, side: CommandSide, baseIndent: Int): String {
         val sb = StringBuilder()
+        if (root.action != null) {
+            appendPermissionAndExecutes(root, side, baseIndent, sb)
+        }
         for (child in root.children) {
             renderNode(child, cmdMgr, side, baseIndent, sb)
         }
         return sb.toString()
     }
-    private fun renderNode(node: Node, cmdMgr: String, side: CommandSide, indent: Int, sb: StringBuilder) {
+    private fun renderNode(node: Node, cmdMgr: String, side: CommandSide, indent: Int, sb: StringBuilder,
+                           enumValue: String? = null, enumArgName: String? = null) {
         val pad = "    ".repeat(indent)
         when (val token = node.token) {
             is CommandToken.Literal -> {
                 sb.append("${pad}.then(${cmdMgr}.literal(\"${token.text}\")\n")
-                appendPermissionAndExecutes(node, side, indent + 1, sb)
+                appendPermissionAndExecutes(node, side, indent + 1, sb, enumValue = enumValue, enumArgName = enumArgName)
                 for (child in node.children) {
-                    renderNode(child, cmdMgr, side, indent + 1, sb)
+                    renderNode(child, cmdMgr, side, indent + 1, sb, enumValue = enumValue, enumArgName = enumArgName)
                 }
                 sb.append("${pad})\n")
             }
             is CommandToken.Required -> {
                 val factory = argFactory(token.arg.type)
                 sb.append("${pad}.then(${cmdMgr}.argument(\"${token.arg.name}\", $factory)\n")
-                appendPermissionAndExecutes(node, side, indent + 1, sb)
+                appendPermissionAndExecutes(node, side, indent + 1, sb, enumValue = enumValue, enumArgName = enumArgName)
                 for (child in node.children) {
-                    renderNode(child, cmdMgr, side, indent + 1, sb)
+                    renderNode(child, cmdMgr, side, indent + 1, sb, enumValue = enumValue, enumArgName = enumArgName)
                 }
                 sb.append("${pad})\n")
             }
             is CommandToken.Optional -> {
                 if (node.action != null) {
-                    appendPermissionAndExecutes(node, side, indent, sb, optionalDefault = token.arg)
+                    appendPermissionAndExecutes(node, side, indent, sb, optionalDefault = token.arg, enumValue = enumValue, enumArgName = enumArgName)
                 }
                 val factory = argFactory(token.arg.type)
                 sb.append("${pad}.then(${cmdMgr}.argument(\"${token.arg.name}\", $factory)\n")
                 if (node.action != null) {
-                    appendPermissionAndExecutes(node, side, indent + 1, sb)
+                    appendPermissionAndExecutes(node, side, indent + 1, sb, enumValue = enumValue, enumArgName = enumArgName)
                 }
                 for (child in node.children) {
-                    renderNode(child, cmdMgr, side, indent + 1, sb)
+                    renderNode(child, cmdMgr, side, indent + 1, sb, enumValue = enumValue, enumArgName = enumArgName)
                 }
                 sb.append("${pad})\n")
             }
@@ -366,12 +386,24 @@ object CommandTreeBuilder {
                         appendPermissionAndExecutes(node, side, indent + 1, sb, enumValue = value, enumArgName = token.arg.name)
                     }
                     for (child in node.children) {
-                        renderNode(child, cmdMgr, side, indent + 1, sb)
+                        renderNode(child, cmdMgr, side, indent + 1, sb, enumValue = value, enumArgName = token.arg.name)
                     }
                     sb.append("${pad})\n")
                 }
             }
-            null -> {} // root node
+            is CommandToken.RequiredEnum -> {
+                for (value in token.arg.values) {
+                    sb.append("${pad}.then(${cmdMgr}.literal(\"$value\")\n")
+                    if (node.action != null) {
+                        appendPermissionAndExecutes(node, side, indent + 1, sb, enumValue = value, enumArgName = token.arg.name)
+                    }
+                    for (child in node.children) {
+                        renderNode(child, cmdMgr, side, indent + 1, sb, enumValue = value, enumArgName = token.arg.name)
+                    }
+                    sb.append("${pad})\n")
+                }
+            }
+            null -> {}
         }
     }
     private fun appendPermissionAndExecutes(
@@ -391,8 +423,8 @@ object CommandTreeBuilder {
         }
         sb.append("${pad}.executes(context -> {\n")
         val call = buildCall(action, node.visibleArgs, side, optionalDefault, optionalEnumDefault, enumValue, enumArgName)
-        sb.append("${pad}    context.getSource().sendFeedback(Text.literal($call));\n")
-        sb.append("${pad}    return 1;\n")
+        sb.append("$pad    context.getSource().sendFeedback(() -> Text.literal($call), true);\n")
+        sb.append("$pad    return 1;\n")
         sb.append("${pad}})\n")
     }
     private fun buildCall(
@@ -409,13 +441,15 @@ object CommandTreeBuilder {
                 val resolvedArgs = action.args.map { argRef ->
                     resolveArg(argRef, visibleArgs, side, optionalDefault, optionalEnumDefault, enumValue, enumArgName)
                 }
-                "${action.function}(${resolvedArgs.joinToString(", ")})"
+                val allArgs = resolvedArgs + "context"
+                "${action.function}(${allArgs.joinToString(", ")})"
             }
             is CommandAction.AutoCall -> {
                 val resolvedArgs = visibleArgs.map { (name, token) ->
                     resolveTokenValue(name, token, side, optionalDefault, optionalEnumDefault, enumValue, enumArgName)
                 }
-                "${action.function}(${resolvedArgs.joinToString(", ")})"
+                val allArgs = resolvedArgs + "context"
+                "${action.function}(${allArgs.joinToString(", ")})"
             }
         }
     }
@@ -431,20 +465,16 @@ object CommandTreeBuilder {
         if (enumArgName != null && argRef == enumArgName) {
             return if (enumValue != null) "\"$enumValue\"" else "\"${optionalEnumDefault?.default ?: ""}\""
         }
-
         if (optionalDefault != null && argRef == optionalDefault.name) {
             return defaultValueLiteral(optionalDefault)
         }
-
         if (optionalEnumDefault != null && argRef == optionalEnumDefault.name) {
             return "\"${optionalEnumDefault.default}\""
         }
-
         val found = visibleArgs.find { it.first == argRef }
         if (found != null) {
             return resolveTokenValue(found.first, found.second, side, null, null, enumValue, enumArgName)
         }
-
         return "\"$argRef\""
     }
     private fun resolveTokenValue(
@@ -470,6 +500,13 @@ object CommandTreeBuilder {
                     "\"$enumValue\""
                 } else {
                     "\"${optionalEnumDefault?.default ?: token.arg.default}\""
+                }
+            }
+            is CommandToken.RequiredEnum -> {
+                if (enumValue != null && name == (enumArgName ?: token.arg.name)) {
+                    "\"$enumValue\""
+                } else {
+                    "\"\""
                 }
             }
             is CommandToken.Literal -> "\"${token.text}\""
@@ -519,18 +556,12 @@ object CommandTreeBuilder {
     }
 }
 
-
-
-interface ColonelExtension {
+interface CommanderExtension {
     val packageName: Property<String>
-
     val className: Property<String>
-
     val side: Property<String>
-
     val commandsFile: Property<String>
 }
-
 abstract class GenerateCommandsTask : DefaultTask() {
     @get:InputFile
     abstract val inputFile: Property<File>
@@ -546,50 +577,52 @@ abstract class GenerateCommandsTask : DefaultTask() {
     fun generate() {
         val cmdsFile = inputFile.get()
         if (!cmdsFile.exists()) {
-            logger.warn("Colonel: Commands file not found: ${cmdsFile.absolutePath}")
+            logger.warn("Commander: Commands file not found: ${cmdsFile.absolutePath}")
             return
         }
         val source = cmdsFile.readText()
-        val grammar = ColonelGrammar()
+        val grammar = CommanderGrammar()
         val commandFile = grammar.parseToEnd(source)
         if (commandFile.commands.isEmpty()) {
-            logger.warn("Colonel: No commands found in ${cmdsFile.absolutePath}")
+            logger.warn("Commander: No commands found in ${cmdsFile.absolutePath}")
             return
         }
         val commandSide = when (commandSide.get().lowercase()) {
             "client" -> CommandSide.CLIENT
             "server" -> CommandSide.SERVER
             else -> throw IllegalArgumentException(
-                "Colonel: Invalid side '${this.commandSide.get()}'. Must be 'client' or 'server'."
+                "Commander: Invalid side '${this.commandSide.get()}'. Must be 'client' or 'server'."
             )
         }
-        val javaFile = FlatCodeGenerator.generate(
+        val javaSource = FlatCodeGenerator.generate(
             commandFile,
             packageName.get(),
             generatedClassName.get(),
             commandSide
         )
         val outDir = outputDirectory.get()
-        javaFile.writeTo(outDir)
+        val packageDir = File(outDir, packageName.get().replace('.', '/'))
+        packageDir.mkdirs()
+        val outputFile = File(packageDir, "${generatedClassName.get()}.java")
+        outputFile.writeText(javaSource)
         logger.lifecycle(
-            "Colonel: Generated ${packageName.get()}.${generatedClassName.get()} " +
+            "Commander: Generated ${packageName.get()}.${generatedClassName.get()} " +
                     "with ${commandFile.commands.size} command(s) [${commandSide.name.lowercase()}]"
         )
     }
 }
-
-class ColonelParser : Plugin<Project> {
+@Suppress("unused") //this IS used by the Gradle thingy
+class CommanderParser : Plugin<Project> {
     override fun apply(project: Project) {
-        val extension = project.extensions.create("colonel", ColonelExtension::class.java)
-
-        extension.className.convention("ColonelCommands")
+        val extension = project.extensions.create("commander", CommanderExtension::class.java)
+        extension.className.convention("CommanderCommands")
         extension.side.convention("client")
         extension.commandsFile.convention("src/main/commands/main.cmds")
-        val outputDir = project.layout.buildDirectory.dir("generated/sources/colonel/java/main")
+        val outputDir = project.layout.buildDirectory.dir("generated/sources/commander/java/main")
         val generateTask = project.tasks.register("generateCommands", GenerateCommandsTask::class.java)
         project.afterEvaluate {
             val genTask = project.tasks.getByName("generateCommands") as GenerateCommandsTask
-            genTask.group = "colonel"
+            genTask.group = "commander"
             genTask.description = "Generate Brigadier command registration code from .cmds files"
             genTask.inputFile.set(project.file(extension.commandsFile.get()))
             genTask.packageName.set(extension.packageName)
@@ -600,27 +633,18 @@ class ColonelParser : Plugin<Project> {
             if (cmdsFile.exists()) {
                 project.plugins.withId("java") {
                     val sourceSets = project.extensions.getByType(
-                        org.gradle.api.tasks.SourceSetContainer::class.java
+                        SourceSetContainer::class.java
                     )
                     val mainSourceSet = sourceSets.getByName("main")
                     mainSourceSet.java.srcDir(outputDir)
                 }
-
-                project.plugins.withId("org.jetbrains.kotlin.jvm") {
-                    val sourceSets = project.extensions.getByType(
-                        org.gradle.api.tasks.SourceSetContainer::class.java
-                    )
-                    val mainSourceSet = sourceSets.getByName("main")
-                    mainSourceSet.java.srcDir(outputDir)
-                }
-
                 project.tasks.forEach { task ->
-                    if (task.name == "compileJava" || task.name == "compileKotlin") {
+                    if (task.name == "compileJava" || task.name == "compileKotlin" || task.name == "sourcesJar") {
                         task.dependsOn(generateTask)
                     }
                 }
             } else {
-                project.logger.info("Colonel: No commands file found at ${cmdsFile.absolutePath}, skipping code generation.")
+                project.logger.info("Commander: No commands file found at ${cmdsFile.absolutePath}, skipping code generation.")
             }
         }
     }

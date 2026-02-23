@@ -24,9 +24,9 @@ java {
 
 extensions.configure<GradlePluginDevelopmentExtension>("gradlePlugin") {
     plugins {
-        register("colonel") {
-            id = "org.tanjim.colonel"
-            implementationClass = "org.tanjim.colonel.ColonelParser"
+        register("commander") {
+            id = "org.tanjim.commander"
+            implementationClass = "org.tanjim.commander.CommanderParser"
         }
     }
 }
